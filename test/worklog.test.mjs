@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatDuration, getLocalDayWindow, getWorklogsForDate } from "../src/worklog.mjs";
+import { formatDuration, getLocalDate, getLocalDayWindow, getWorklogsForDate } from "../src/worklog.mjs";
+
+test("gets today's date in the requested timezone", () => {
+  const timestamp = Date.parse("2026-09-24T03:30:00.000Z");
+
+  assert.equal(getLocalDate(timestamp, "Asia/Taipei"), "2026-09-24");
+  assert.equal(getLocalDate(timestamp, "America/Los_Angeles"), "2026-09-23");
+});
 
 test("calculates a local calendar-day window in the requested timezone", () => {
   const window = getLocalDayWindow("2026-09-22", "Asia/Taipei");

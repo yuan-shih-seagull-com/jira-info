@@ -6,7 +6,7 @@ import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
 import { PendingIssuesApp } from "../src/pending-screen.mjs";
-import { fitCell, getColumnWidths, getNextSelectionIndex } from "../src/pending-screen.mjs";
+import { fitCell, getColumnWidths, getNextSelectionIndex, getWorklogColumnWidths } from "../src/pending-screen.mjs";
 
 const testDirectory = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const tuiPath = resolve(testDirectory, "..", "src", "tui.mjs");
@@ -26,6 +26,13 @@ test("keeps issue columns within narrow and standard terminal widths", () => {
     const columns = getColumnWidths(width);
     const overhead = columns.assignee > 0 ? 6 : 5;
     assert.equal(overhead + columns.key + columns.assignee + columns.status + columns.priority + columns.summary, width);
+  }
+});
+
+test("keeps worklog columns within narrow and standard terminal widths", () => {
+  for (const width of [9, 20, 24, 40, 80, 120]) {
+    const columns = getWorklogColumnWidths(width);
+    assert.equal(5 + columns.start + columns.duration + columns.issue + columns.summary, width);
   }
 });
 
@@ -225,6 +232,91 @@ test("shows All and individual tabs for the current and every tracked account", 
     await waitFor(() => app.lastFrame().includes("Assignee: Account 12345678 | 0 issues"));
     assert.ok(app.lastFrame().includes("No pending issues."));
     assert.ok(!app.lastFrame().includes("APP-3"));
+  } finally {
+    app.unmount();
+  }
+});
+
+test("loads current-user worklogs and accepts a date in the TUI", async () => {
+  const requests = [];
+  const session = {
+    accountId: "test-user",
+    cloudId: "test-cloud",
+    jiraBaseUrl: "https://jira.example.test",
+    timeZone: "Asia/Taipei",
+    profile: { displayName: "Test User" },
+    callOperation: async (name, cloudId, inputs) => {
+      requests.push({ name, cloudId, inputs });
+      if (name === "searchJiraIssuesUsingJql" && inputs.jql.includes("worklogAuthor = currentUser()")) {
+        return {
+          isLast: true,
+          issues: [{ id: "44", key: "APP-44", fields: { summary: "Implement date picker" } }]
+        };
+      }
+      if (name === "searchJiraIssuesUsingJql") {
+        return { isLast: true, issues: [] };
+      }
+      if (name === "listJiraIssueWorklogs") {
+        return {
+          isLast: true,
+          total: 1,
+          worklogs: [{
+            id: "worklog-1",
+            author: { accountId: "test-user", displayName: "Test User" },
+            started: new Date(inputs.startedAfter + 9 * 60 * 60 * 1000).toISOString(),
+            timeSpentSeconds: 5400,
+            comment: "TUI date input"
+          }]
+        };
+      }
+      throw new Error(`Unexpected MCP operation ${name}`);
+    }
+  };
+  const refreshSchedule = {
+    enabled: false,
+    intervalMinutes: 60,
+    workingHours: { start: "09:00", end: "17:00", days: [1, 2, 3, 4, 5] }
+  };
+  const app = render(React.createElement(PendingIssuesApp, { session, refreshSchedule }));
+  const worklogSearches = () => requests.filter((request) =>
+    request.name === "searchJiraIssuesUsingJql" && request.inputs.jql.includes("worklogAuthor = currentUser()")
+  );
+
+  try {
+    app.stdin.write("w");
+    await waitFor(() => worklogSearches().length === 1);
+    await waitFor(() => app.lastFrame().includes("Implement date picker"));
+    assert.match(app.lastFrame(), /Total: 1h 30m \(1 entry\)/);
+    assert.ok(app.lastFrame().includes("09:00"));
+    assert.ok(app.lastFrame().includes("APP-44"));
+
+    app.stdin.write("d");
+    await waitFor(() => app.lastFrame().includes("Date: YYYY-MM-DD"));
+    app.stdin.write("2026-09-22");
+    await waitFor(() => app.lastFrame().includes("Date: 2026-09-22"));
+    app.stdin.write("\r");
+    await waitFor(() => worklogSearches().length === 2);
+    await waitFor(() => requests.filter((request) => request.name === "listJiraIssueWorklogs").length === 2
+      && !app.lastFrame().includes("Refreshing...")
+      && app.lastFrame().includes("Date: 2026-09-22"));
+    assert.match(app.lastFrame(), /Total: 1h 30m \(1 entry\)/);
+
+    const selectedDateSearch = worklogSearches()[1];
+    assert.match(selectedDateSearch.inputs.jql, /worklogDate >= "2026-09-20"/);
+    assert.match(selectedDateSearch.inputs.jql, /worklogDate <= "2026-09-24"/);
+    const selectedDateWorklogRequest = requests
+      .filter((request) => request.name === "listJiraIssueWorklogs")
+      .at(-1);
+    assert.equal(selectedDateWorklogRequest.inputs.startedAfter, Date.parse("2026-09-21T16:00:00.000Z"));
+    assert.equal(selectedDateWorklogRequest.inputs.startedBefore, Date.parse("2026-09-22T16:00:00.000Z"));
+
+    app.stdin.write("d");
+    await waitFor(() => app.lastFrame().includes("Date: YYYY-MM-DD"));
+    app.stdin.write("2026-02-30");
+    await waitFor(() => app.lastFrame().includes("Date: 2026-02-30"));
+    app.stdin.write("\r");
+    await waitFor(() => app.lastFrame().includes("Invalid calendar date: 2026-02-30"));
+    assert.equal(worklogSearches().length, 2);
   } finally {
     app.unmount();
   }

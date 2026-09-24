@@ -3,6 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import { getPendingIssues, normalizeTrackedAccountIds } from "./issues.mjs";
 import { createTerminalHyperlink, getJiraIssueUrl } from "./issue-links.mjs";
 import { formatWorkingDays, isWithinWorkingHours } from "./refresh-schedule.mjs";
+import { getLocalDate, getLocalDayWindow, getWorklogsForDate } from "./worklog.mjs";
 
 const h = React.createElement;
 
@@ -40,6 +41,23 @@ export function getColumnWidths(terminalWidth) {
   return { ...widths, summary };
 }
 
+export function getWorklogColumnWidths(terminalWidth) {
+  const overhead = 5;
+  const available = Math.max(4, terminalWidth - overhead);
+  const widths = {
+    start: Math.max(1, Math.min(8, Math.floor(available * 0.2))),
+    duration: Math.max(1, Math.min(10, Math.floor(available * 0.22))),
+    issue: Math.max(1, Math.min(12, Math.floor(available * 0.2)))
+  };
+  for (const column of ["issue", "duration", "start"]) {
+    while (widths.start + widths.duration + widths.issue > available - 1 && widths[column] > 1) {
+      widths[column] -= 1;
+    }
+  }
+  const summary = Math.max(1, available - widths.start - widths.duration - widths.issue);
+  return { ...widths, summary };
+}
+
 export function getNextSelectionIndex(index, issueCount, direction) {
   if (issueCount === 0) {
     return 0;
@@ -71,11 +89,19 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
   const { exit } = useApp();
   const [issues, setIssues] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [selectedAccountId, setSelectedAccountId] = useState(null);
+  const [selectedTabId, setSelectedTabId] = useState("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [lastRefreshedAt, setLastRefreshedAt] = useState(null);
+  const [worklogDate, setWorklogDate] = useState(() => getLocalDate(Date.now(), session.timeZone));
+  const [dateInput, setDateInput] = useState("");
+  const [editingDate, setEditingDate] = useState(false);
+  const [worklogReport, setWorklogReport] = useState(null);
+  const [worklogLoading, setWorklogLoading] = useState(false);
+  const [worklogError, setWorklogError] = useState("");
   const refreshInProgress = useRef(false);
+  const worklogRequestId = useRef(0);
+  const activeTabRef = useRef(null);
   const colleagueAccountIds = normalizeTrackedAccountIds(trackedAccountIds)
     .filter((accountId) => accountId !== session.accountId);
   const accountIds = colleagueAccountIds.length > 0
@@ -87,19 +113,25 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
     .filter((issue) => issue.assigneeAccountId && issue.assignee)
     .map((issue) => [issue.assigneeAccountId, issue.assignee]));
   const tabs = [
-    { accountId: null, label: "All" },
+    { id: "all", kind: "issues", accountId: null, label: "All" },
     ...individualAccountIds.map((accountId) => ({
+      id: `account:${accountId}`,
+      kind: "issues",
       accountId,
       label: accountId === session.accountId
         ? displayName
         : accountNames.get(accountId) ?? `Account ${accountId.slice(-8)}`
-    }))
+    })),
+    { id: "worklogs", kind: "worklogs", accountId: null, label: "Worklogs" }
   ];
-  const selectedTabIndex = Math.max(0, tabs.findIndex((tab) => tab.accountId === selectedAccountId));
+  const selectedTabIndex = Math.max(0, tabs.findIndex((tab) => tab.id === selectedTabId));
   const activeTab = tabs[selectedTabIndex];
-  const visibleIssues = getIssuesForTab(issues, activeTab.accountId);
+  activeTabRef.current = activeTab;
+  const visibleIssues = activeTab.kind === "issues" ? getIssuesForTab(issues, activeTab.accountId) : [];
+  const visibleWorklogs = activeTab.kind === "worklogs" ? worklogReport?.entries ?? [] : [];
+  const visibleItems = activeTab.kind === "worklogs" ? visibleWorklogs : visibleIssues;
 
-  const refresh = async () => {
+  const refreshIssues = async () => {
     if (refreshInProgress.current) {
       return;
     }
@@ -112,9 +144,12 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
         cloudId: session.cloudId,
         accountIds
       });
-      const nextVisibleIssues = getIssuesForTab(nextIssues, activeTab.accountId);
       setIssues(nextIssues);
-      setSelectedIndex((index) => Math.min(index, Math.max(0, nextVisibleIssues.length - 1)));
+      const currentTab = activeTabRef.current;
+      if (currentTab?.kind === "issues") {
+        const nextVisibleIssues = getIssuesForTab(nextIssues, currentTab.accountId);
+        setSelectedIndex((index) => Math.min(index, Math.max(0, nextVisibleIssues.length - 1)));
+      }
       setLastRefreshedAt(Date.now());
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
@@ -123,8 +158,49 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
       setLoading(false);
     }
   };
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  const loadWorklogs = async (date) => {
+    const requestId = ++worklogRequestId.current;
+    setWorklogLoading(true);
+    setWorklogError("");
+    setWorklogReport((currentReport) => currentReport?.date === date ? currentReport : null);
+    try {
+      const report = await getWorklogsForDate({
+        callOperation: session.callOperation,
+        cloudId: session.cloudId,
+        accountId: session.accountId,
+        date,
+        timeZone: session.timeZone
+      });
+      if (requestId !== worklogRequestId.current) {
+        return;
+      }
+      setWorklogReport(report);
+      if (activeTabRef.current?.kind === "worklogs") {
+        setSelectedIndex((index) => Math.min(index, Math.max(0, report.entries.length - 1)));
+      }
+      setLastRefreshedAt(Date.now());
+    } catch (worklogRefreshError) {
+      if (requestId === worklogRequestId.current) {
+        setWorklogError(worklogRefreshError instanceof Error ? worklogRefreshError.message : String(worklogRefreshError));
+      }
+    } finally {
+      if (requestId === worklogRequestId.current) {
+        setWorklogLoading(false);
+      }
+    }
+  };
+  const refreshIssuesRef = useRef(refreshIssues);
+  refreshIssuesRef.current = refreshIssues;
+  const loadWorklogsRef = useRef(loadWorklogs);
+  loadWorklogsRef.current = loadWorklogs;
+  const refreshCurrentTab = () => {
+    if (activeTabRef.current?.kind === "worklogs") {
+      return editingDate ? undefined : loadWorklogsRef.current(worklogDate);
+    }
+    return refreshIssuesRef.current();
+  };
+  const refreshRef = useRef(refreshCurrentTab);
+  refreshRef.current = refreshCurrentTab;
 
   useEffect(() => {
     void refreshRef.current();
@@ -139,47 +215,92 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
     return () => clearInterval(timer);
   }, [refreshSchedule, session.timeZone]);
 
-  const moveTab = (direction) => {
-    const nextTabIndex = Math.max(0, Math.min(tabs.length - 1, selectedTabIndex + direction));
+  const selectTab = (index) => {
+    const nextTabIndex = Math.max(0, Math.min(tabs.length - 1, index));
+    if (nextTabIndex === selectedTabIndex) {
+      return;
+    }
     const nextTab = tabs[nextTabIndex];
-    if (nextTab.accountId !== activeTab.accountId) {
-      setSelectedAccountId(nextTab.accountId);
-      setSelectedIndex(0);
+    setSelectedTabId(nextTab.id);
+    setSelectedIndex(0);
+    setEditingDate(false);
+    setDateInput("");
+    if (nextTab.kind === "worklogs" && worklogReport?.date !== worklogDate) {
+      void loadWorklogsRef.current(worklogDate);
     }
   };
 
   useInput((input, key) => {
+    if (editingDate) {
+      if (key.escape) {
+        setEditingDate(false);
+        setDateInput("");
+        setWorklogError("");
+      } else if (key.return) {
+        try {
+          getLocalDayWindow(dateInput, session.timeZone);
+          setWorklogDate(dateInput);
+          setDateInput("");
+          setEditingDate(false);
+          setSelectedIndex(0);
+          void loadWorklogsRef.current(dateInput);
+        } catch (dateError) {
+          setWorklogError(dateError instanceof Error ? dateError.message : String(dateError));
+        }
+      } else if (key.backspace || key.delete) {
+        setDateInput((value) => value.slice(0, -1));
+        setWorklogError("");
+      } else if (input) {
+        const dateCharacters = input.replace(/[^0-9-]/g, "");
+        if (dateCharacters) {
+          setDateInput((value) => `${value}${dateCharacters}`.slice(0, 10));
+          setWorklogError("");
+        }
+      }
+      return;
+    }
     if (input.toLowerCase() === "q" || key.escape) {
       exit();
     } else if (input.toLowerCase() === "r") {
       void refreshRef.current();
+    } else if (input.toLowerCase() === "w") {
+      selectTab(tabs.findIndex((tab) => tab.id === "worklogs"));
+    } else if (input.toLowerCase() === "d" && activeTab.kind === "worklogs") {
+      setDateInput("");
+      setEditingDate(true);
+      setWorklogError("");
     } else if (key.leftArrow) {
-      moveTab(-1);
+      selectTab(selectedTabIndex - 1);
     } else if (key.rightArrow) {
-      moveTab(1);
+      selectTab(selectedTabIndex + 1);
     } else if (key.upArrow) {
-      setSelectedIndex((index) => getNextSelectionIndex(index, visibleIssues.length, -1));
+      setSelectedIndex((index) => getNextSelectionIndex(index, visibleItems.length, -1));
     } else if (key.downArrow) {
-      setSelectedIndex((index) => getNextSelectionIndex(index, visibleIssues.length, 1));
+      setSelectedIndex((index) => getNextSelectionIndex(index, visibleItems.length, 1));
     }
   });
 
   const terminalWidth = process.stdout.columns ?? 100;
   const terminalHeight = process.stdout.rows ?? 24;
   const columns = getColumnWidths(terminalWidth);
+  const worklogColumns = getWorklogColumnWidths(terminalWidth);
   const visibleCount = Math.max(1, terminalHeight - 10);
-  const visibleRange = getVisibleIssueRange(visibleIssues.length, selectedIndex, visibleCount);
+  const visibleRange = getVisibleIssueRange(visibleItems.length, selectedIndex, visibleCount);
   const issueCount = `${visibleIssues.length} ${visibleIssues.length === 1 ? "issue" : "issues"}`;
-  const accountDescription = activeTab.accountId !== null
-    ? `Assignee: ${activeTab.label} | ${issueCount}`
-    : colleagueAccountIds.length > 0
-      ? `Tracking ${displayName} + ${colleagueAccountIds.length} ${colleagueAccountIds.length === 1 ? "colleague" : "colleagues"} | ${issueCount}`
-      : `Assignee: ${displayName} | ${issueCount}`;
+  const accountDescription = activeTab.kind === "worklogs"
+    ? `Worklogs for ${displayName}`
+    : activeTab.accountId !== null
+      ? `Assignee: ${activeTab.label} | ${issueCount}`
+      : colleagueAccountIds.length > 0
+        ? `Tracking ${displayName} + ${colleagueAccountIds.length} ${colleagueAccountIds.length === 1 ? "colleague" : "colleagues"} | ${issueCount}`
+        : `Assignee: ${displayName} | ${issueCount}`;
+  const activeLoading = activeTab.kind === "worklogs" ? worklogLoading : loading;
   const refreshDescription = refreshSchedule.enabled
     ? `Auto refresh: every ${refreshSchedule.intervalMinutes} min, ${formatWorkingDays(refreshSchedule.workingHours.days)} ${refreshSchedule.workingHours.start}-${refreshSchedule.workingHours.end} (${session.timeZone})`
     : "Auto refresh: off";
   const header = `  ${fitCell("KEY", columns.key)}${columns.assignee > 0 ? ` ${fitCell("ASSIGNEE", columns.assignee)}` : ""} ${fitCell("STATUS", columns.status)} ${fitCell("PRIORITY", columns.priority)} ${fitCell("SUMMARY", columns.summary)}`;
-  const rows = visibleIssues.slice(visibleRange.start, visibleRange.end).map((issue, index) => {
+  const worklogHeader = `  ${fitCell("START", worklogColumns.start)} ${fitCell("DURATION", worklogColumns.duration)} ${fitCell("ISSUE", worklogColumns.issue)} ${fitCell("SUMMARY", worklogColumns.summary)}`;
+  const issueRows = visibleIssues.slice(visibleRange.start, visibleRange.end).map((issue, index) => {
     const issueIndex = visibleRange.start + index;
     const selected = issueIndex === selectedIndex;
     const issueKey = fitCell(issue.key, columns.key).trimEnd();
@@ -191,29 +312,55 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
     return h(Box, { key: issue.id, backgroundColor: selected ? "blue" : undefined },
       h(Text, { color: selected ? "white" : undefined }, row));
   });
+  const worklogRows = visibleWorklogs.slice(visibleRange.start, visibleRange.end).map((entry, index) => {
+    const entryIndex = visibleRange.start + index;
+    const selected = entryIndex === selectedIndex;
+    const issueKey = fitCell(entry.issueKey, worklogColumns.issue).trimEnd();
+    const issueKeyCell = session.jiraBaseUrl
+      ? `${createTerminalHyperlink(getJiraIssueUrl(session.jiraBaseUrl, entry.issueKey), issueKey)}${" ".repeat(Math.max(0, worklogColumns.issue - issueKey.length))}`
+      : fitCell(entry.issueKey, worklogColumns.issue);
+    const summary = String(entry.summary).replace(/\s+/g, " ").trim();
+    const row = `${selected ? "> " : "  "}${fitCell(entry.localStartTime, worklogColumns.start)} ${fitCell(entry.timeSpent, worklogColumns.duration)} ${issueKeyCell} ${fitCell(summary, worklogColumns.summary)}`;
+    return h(Box, { key: entry.worklogId ?? `${entry.issueKey}-${entry.startedAt}-${index}`, backgroundColor: selected ? "blue" : undefined },
+      h(Text, { color: selected ? "white" : undefined }, row));
+  });
+  const rows = activeTab.kind === "worklogs" ? worklogRows : issueRows;
   const refreshed = lastRefreshedAt === null
     ? "Not yet"
     : formatTime(lastRefreshedAt, session.timeZone);
 
   return h(Box, { flexDirection: "column" },
-    h(Text, { bold: true, color: "cyan" }, "Jira pending issues"),
+    h(Text, { bold: true, color: "cyan" }, activeTab.kind === "worklogs" ? "Jira worklogs" : "Jira pending issues"),
     h(Text, { dimColor: true }, accountDescription),
-    h(Text, { dimColor: true }, `Last refreshed: ${refreshed}${loading ? " | Refreshing..." : ""}`),
+    activeTab.kind === "worklogs"
+      ? h(Text, { bold: editingDate }, `Date: ${editingDate ? (dateInput || "YYYY-MM-DD") : `${worklogDate} (${session.timeZone})`}${worklogLoading ? " | Refreshing..." : ""}`)
+      : h(Text, { dimColor: true }, `Last refreshed: ${refreshed}${activeLoading ? " | Refreshing..." : ""}`),
+    activeTab.kind === "worklogs" && worklogReport
+      ? h(Text, { dimColor: true }, `Total: ${worklogReport.totalTimeSpent} (${worklogReport.entryCount} ${worklogReport.entryCount === 1 ? "entry" : "entries"})`)
+      : null,
     h(Text, { dimColor: true }, refreshDescription),
     h(Box, { flexDirection: "row", flexWrap: "wrap", marginTop: 1 },
       ...tabs.map((tab, index) => h(Text, {
-        key: tab.accountId ?? "all",
+        key: tab.id,
         bold: index === selectedTabIndex,
         color: index === selectedTabIndex ? "black" : undefined,
         backgroundColor: index === selectedTabIndex ? "cyan" : undefined,
         dimColor: index !== selectedTabIndex
       }, ` ${tab.label} `))),
-    error ? h(Text, { color: "red" }, `Refresh failed: ${error}`) : null,
+    (activeTab.kind === "worklogs" ? worklogError : error)
+      ? h(Text, { color: "red" }, `Refresh failed: ${activeTab.kind === "worklogs" ? worklogError : error}`)
+      : null,
     h(Box, { flexDirection: "column", marginTop: 1 },
-      h(Text, { bold: true }, header),
-      ...(visibleIssues.length > 0 ? rows : [h(Text, { key: "empty", dimColor: true }, loading ? "Loading issues..." : "No pending issues.")]),
-      visibleIssues.length > visibleCount
-        ? h(Text, { key: "range", dimColor: true }, `Showing ${visibleRange.start + 1}-${visibleRange.end} of ${visibleIssues.length}`)
+      h(Text, { bold: true }, activeTab.kind === "worklogs" ? worklogHeader : header),
+      ...(visibleItems.length > 0 ? rows : [h(Text, { key: "empty", dimColor: true }, activeLoading
+        ? (activeTab.kind === "worklogs" ? "Loading worklogs..." : "Loading issues...")
+        : (activeTab.kind === "worklogs" ? "No worklogs for this date." : "No pending issues."))]),
+      visibleItems.length > visibleCount
+        ? h(Text, { key: "range", dimColor: true }, `Showing ${visibleRange.start + 1}-${visibleRange.end} of ${visibleItems.length}`)
         : null),
-    h(Text, { dimColor: true }, "Left/Right tabs | Up/Down select | r refresh now | q quit"));
+    h(Text, { dimColor: true }, editingDate
+      ? "Type YYYY-MM-DD | Enter load | Esc cancel"
+      : activeTab.kind === "worklogs"
+        ? "d date | Left/Right tabs | Up/Down select | r refresh | q quit"
+        : "Left/Right tabs | w worklogs | Up/Down select | r refresh now | q quit"));
 }

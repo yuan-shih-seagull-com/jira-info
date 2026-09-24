@@ -102,6 +102,10 @@ function localDateTime(timestamp, timeZone) {
   };
 }
 
+export function getLocalDate(timestamp, timeZone) {
+  return localDateTime(timestamp, timeZone).localDate;
+}
+
 export function formatDuration(seconds) {
   if (!Number.isInteger(seconds) || seconds < 0) {
     throw new TypeError(`Duration must be a non-negative integer number of seconds: ${seconds}`);

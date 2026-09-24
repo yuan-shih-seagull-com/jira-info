@@ -86,6 +86,8 @@ The list includes only `In Progress` and `Open` issues, showing `In Progress` fi
 
 To include colleagues, add their Jira account IDs to `trackedAccountIds` in `worklog.config.json`. The signed-in user stays included automatically, and the list shows each issue's assignee. The TUI provides an `All` tab and an individual tab for the signed-in user and every configured account, including accounts with no pending issues.
 
+The `Worklogs` tab shows the signed-in user's entries and daily total. It defaults to today in the Jira timezone. Press `w` to open it, then `d`, enter a date as `YYYY-MM-DD`, and press Enter to load another day; press Esc to cancel.
+
 ```json
 {
   "trackedAccountIds": ["colleague-account-id-1", "colleague-account-id-2"]
