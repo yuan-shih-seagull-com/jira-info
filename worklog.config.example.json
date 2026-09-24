@@ -1,0 +1,27 @@
+{
+  "server": {
+    "command": "node",
+    "args": [
+      "node_modules/mcp-remote/dist/proxy.js",
+      "https://mcp.atlassian.com/v2/mcp",
+      "--protocol",
+      "auto",
+      "--resource",
+      "https://mojixinc.atlassian.net/"
+    ],
+    "cwd": "."
+  },
+  "cloudId": "",
+  "jiraBaseUrl": "https://mojixinc.atlassian.net",
+  "trackedAccountIds": [],
+  "timeZone": "Asia/Taipei",
+  "refresh": {
+    "enabled": true,
+    "intervalMinutes": 60,
+    "workingHours": {
+      "start": "09:00",
+      "end": "17:00",
+      "days": [1, 2, 3, 4, 5]
+    }
+  }
+}
