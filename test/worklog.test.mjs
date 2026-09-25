@@ -91,6 +91,73 @@ test("returns only the current user's worklogs that start on the requested local
   assert.equal(worklogQuery.inputs.startedBefore, Date.parse("2026-09-22T16:00:00.000Z"));
 });
 
+test("returns worklogs and totals for every requested account only", async () => {
+  const requests = [];
+  const callOperation = async (name, cloudId, inputs) => {
+    requests.push({ name, cloudId, inputs });
+    if (name === "searchJiraIssuesUsingJql") {
+      return {
+        isLast: true,
+        issues: [{ id: "1", key: "APP-1", fields: { summary: "Shared task" } }]
+      };
+    }
+    if (name === "listJiraIssueWorklogs") {
+      return {
+        isLast: true,
+        total: 3,
+        worklogs: [{
+          id: "current-entry",
+          author: { accountId: "current-account", displayName: "Current User" },
+          started: "2026-09-22T01:00:00Z",
+          timeSpentSeconds: 3600
+        }, {
+          id: "tracked-entry",
+          author: { accountId: "tracked-account", displayName: "Tracked User" },
+          started: "2026-09-22T02:00:00Z",
+          timeSpentSeconds: 7200
+        }, {
+          id: "untracked-entry",
+          author: { accountId: "untracked-account", displayName: "Untracked User" },
+          started: "2026-09-22T03:00:00Z",
+          timeSpentSeconds: 10800
+        }]
+      };
+    }
+    throw new Error(`Unexpected MCP operation ${name}`);
+  };
+
+  const report = await getWorklogsForDate({
+    callOperation,
+    cloudId: "jira-cloud-id",
+    accountIds: ["current-account", "tracked-account", "no-entry-account", "tracked-account"],
+    date: "2026-09-22",
+    timeZone: "UTC"
+  });
+
+  const search = requests.find((request) => request.name === "searchJiraIssuesUsingJql");
+  assert.match(search.inputs.jql, /worklogAuthor in \("current-account", "tracked-account", "no-entry-account"\)/);
+  assert.deepEqual(report.entries.map((entry) => entry.authorAccountId), ["current-account", "tracked-account"]);
+  assert.deepEqual(report.accountTotals, [{
+    accountId: "current-account",
+    displayName: "Current User",
+    entryCount: 1,
+    totalSeconds: 3600,
+    totalTimeSpent: "1h"
+  }, {
+    accountId: "tracked-account",
+    displayName: "Tracked User",
+    entryCount: 1,
+    totalSeconds: 7200,
+    totalTimeSpent: "2h"
+  }, {
+    accountId: "no-entry-account",
+    displayName: "no-entry-account",
+    entryCount: 0,
+    totalSeconds: 0,
+    totalTimeSpent: "0m"
+  }]);
+});
+
 test("formats durations without rounding away seconds", () => {
   assert.equal(formatDuration(19830), "5h 30m 30s");
   assert.equal(formatDuration(0), "0m");

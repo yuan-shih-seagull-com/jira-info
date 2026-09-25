@@ -135,10 +135,26 @@ function unwrapData(value) {
   return result;
 }
 
-async function getCandidateIssues(callOperation, cloudId, date) {
+function normalizeAccountIds(accountIds) {
+  if (!Array.isArray(accountIds) || accountIds.length === 0 || accountIds.some((accountId) =>
+    typeof accountId !== "string" || !accountId.trim()
+  )) {
+    throw new TypeError("At least one non-empty accountId is required to filter worklogs.");
+  }
+  return [...new Set(accountIds.map((accountId) => accountId.trim()))];
+}
+
+function quoteJqlValue(value) {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+async function getCandidateIssues(callOperation, cloudId, date, accountIds) {
   const startDate = shiftDate(date, -2);
   const endDate = shiftDate(date, 2);
-  const jql = `worklogAuthor = currentUser() AND worklogDate >= "${startDate}" AND worklogDate <= "${endDate}"`;
+  const authorClause = accountIds === undefined
+    ? "worklogAuthor = currentUser()"
+    : `worklogAuthor in (${accountIds.map(quoteJqlValue).join(", ")})`;
+  const jql = `${authorClause} AND worklogDate >= "${startDate}" AND worklogDate <= "${endDate}"`;
   const issues = [];
   const seenTokens = new Set();
   let nextPageToken;
@@ -210,12 +226,19 @@ async function getIssueWorklogs(callOperation, cloudId, issueIdOrKey, startMs, e
   return worklogs;
 }
 
-export async function getWorklogsForDate({ callOperation, cloudId, accountId, date, timeZone }) {
-  if (!accountId) {
+export async function getWorklogsForDate({ callOperation, cloudId, accountId, accountIds, date, timeZone }) {
+  if (accountIds === undefined && !accountId) {
     throw new TypeError("An accountId is required to filter worklogs to the current user.");
   }
+  const requestedAccountIds = normalizeAccountIds(accountIds ?? [accountId]);
+  const requestedAccountIdSet = new Set(requestedAccountIds);
   const { startMs, endMs } = getLocalDayWindow(date, timeZone);
-  const issues = await getCandidateIssues(callOperation, cloudId, date);
+  const issues = await getCandidateIssues(
+    callOperation,
+    cloudId,
+    date,
+    accountIds === undefined ? undefined : requestedAccountIds
+  );
   const entries = [];
 
   for (const issue of issues) {
@@ -226,7 +249,7 @@ export async function getWorklogsForDate({ callOperation, cloudId, accountId, da
     const worklogs = await getIssueWorklogs(callOperation, cloudId, issueIdOrKey, startMs, endMs);
 
     for (const worklog of worklogs) {
-      if (worklog.author?.accountId !== accountId) {
+      if (!requestedAccountIdSet.has(worklog.author?.accountId)) {
         continue;
       }
 
@@ -248,6 +271,7 @@ export async function getWorklogsForDate({ callOperation, cloudId, accountId, da
         worklogId: worklog.id ?? null,
         issueKey: issue.key ?? String(issue.id),
         summary: issue.fields?.summary ?? issue.summary ?? "",
+        authorAccountId: worklog.author.accountId,
         author: worklog.author.displayName ?? "",
         startedAt: worklog.started,
         localStartTime: localDateTime(startedMs, timeZone).localTime,
@@ -264,6 +288,17 @@ export async function getWorklogsForDate({ callOperation, cloudId, accountId, da
 
   entries.sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
   const totalSeconds = entries.reduce((total, entry) => total + entry.timeSpentSeconds, 0);
+  const accountTotals = requestedAccountIds.map((requestedAccountId) => {
+    const accountEntries = entries.filter((entry) => entry.authorAccountId === requestedAccountId);
+    const accountTotalSeconds = accountEntries.reduce((total, entry) => total + entry.timeSpentSeconds, 0);
+    return {
+      accountId: requestedAccountId,
+      displayName: accountEntries.find((entry) => entry.author)?.author ?? requestedAccountId,
+      entryCount: accountEntries.length,
+      totalSeconds: accountTotalSeconds,
+      totalTimeSpent: formatDuration(accountTotalSeconds)
+    };
+  });
   return {
     date,
     timeZone,
@@ -271,6 +306,7 @@ export async function getWorklogsForDate({ callOperation, cloudId, accountId, da
     entryCount: entries.length,
     totalSeconds,
     totalTimeSpent: formatDuration(totalSeconds),
+    accountTotals,
     entries
   };
 }

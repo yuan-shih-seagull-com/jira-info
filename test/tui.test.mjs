@@ -32,7 +32,8 @@ test("keeps issue columns within narrow and standard terminal widths", () => {
 test("keeps worklog columns within narrow and standard terminal widths", () => {
   for (const width of [9, 20, 24, 40, 80, 120]) {
     const columns = getWorklogColumnWidths(width);
-    assert.equal(5 + columns.start + columns.duration + columns.issue + columns.summary, width);
+    const overhead = columns.author > 0 ? 6 : 5;
+    assert.equal(overhead + columns.author + columns.start + columns.duration + columns.issue + columns.summary, width);
   }
 });
 
@@ -237,7 +238,7 @@ test("shows All and individual tabs for the current and every tracked account", 
   }
 });
 
-test("loads current-user worklogs and accepts a date in the TUI", async () => {
+test("loads tracked-account worklogs and accepts a date in the TUI", async () => {
   const requests = [];
   const session = {
     accountId: "test-user",
@@ -247,7 +248,7 @@ test("loads current-user worklogs and accepts a date in the TUI", async () => {
     profile: { displayName: "Test User" },
     callOperation: async (name, cloudId, inputs) => {
       requests.push({ name, cloudId, inputs });
-      if (name === "searchJiraIssuesUsingJql" && inputs.jql.includes("worklogAuthor = currentUser()")) {
+      if (name === "searchJiraIssuesUsingJql" && inputs.jql.includes("worklogAuthor in (")) {
         return {
           isLast: true,
           issues: [{ id: "44", key: "APP-44", fields: { summary: "Implement date picker" } }]
@@ -259,13 +260,23 @@ test("loads current-user worklogs and accepts a date in the TUI", async () => {
       if (name === "listJiraIssueWorklogs") {
         return {
           isLast: true,
-          total: 1,
+          total: 3,
           worklogs: [{
             id: "worklog-1",
             author: { accountId: "test-user", displayName: "Test User" },
             started: new Date(inputs.startedAfter + 9 * 60 * 60 * 1000).toISOString(),
             timeSpentSeconds: 5400,
             comment: "TUI date input"
+          }, {
+            id: "worklog-2",
+            author: { accountId: "tracked-user", displayName: "Tracked User" },
+            started: new Date(inputs.startedAfter + 10 * 60 * 60 * 1000).toISOString(),
+            timeSpentSeconds: 3600
+          }, {
+            id: "worklog-untracked",
+            author: { accountId: "untracked-user", displayName: "Untracked User" },
+            started: new Date(inputs.startedAfter + 11 * 60 * 60 * 1000).toISOString(),
+            timeSpentSeconds: 7200
           }]
         };
       }
@@ -277,16 +288,24 @@ test("loads current-user worklogs and accepts a date in the TUI", async () => {
     intervalMinutes: 60,
     workingHours: { start: "09:00", end: "17:00", days: [1, 2, 3, 4, 5] }
   };
-  const app = render(React.createElement(PendingIssuesApp, { session, refreshSchedule }));
+  const app = render(React.createElement(PendingIssuesApp, {
+    session,
+    refreshSchedule,
+    trackedAccountIds: ["tracked-user", "empty-user"]
+  }));
   const worklogSearches = () => requests.filter((request) =>
-    request.name === "searchJiraIssuesUsingJql" && request.inputs.jql.includes("worklogAuthor = currentUser()")
+    request.name === "searchJiraIssuesUsingJql" && request.inputs.jql.includes("worklogAuthor in (")
   );
 
   try {
     app.stdin.write("w");
     await waitFor(() => worklogSearches().length === 1);
     await waitFor(() => app.lastFrame().includes("Implement date picker"));
-    assert.match(app.lastFrame(), /Total: 1h 30m \(1 entry\)/);
+    assert.match(worklogSearches()[0].inputs.jql, /worklogAuthor in \("test-user", "tracked-user", "empty-user"\)/);
+    assert.match(app.lastFrame(), /Total: 2h 30m \(2 entries\)/);
+    assert.match(app.lastFrame(), /By account: Test User: 1h 30m \(1\) \| Tracked User: 1h \(1\) \| Account pty-user: 0m \(0\)/);
+    assert.ok(app.lastFrame().includes("Tracked User"));
+    assert.ok(!app.lastFrame().includes("Untracked User"));
     assert.ok(app.lastFrame().includes("09:00"));
     assert.ok(app.lastFrame().includes("APP-44"));
 
@@ -299,7 +318,7 @@ test("loads current-user worklogs and accepts a date in the TUI", async () => {
     await waitFor(() => requests.filter((request) => request.name === "listJiraIssueWorklogs").length === 2
       && !app.lastFrame().includes("Refreshing...")
       && app.lastFrame().includes("Date: 2026-09-22"));
-    assert.match(app.lastFrame(), /Total: 1h 30m \(1 entry\)/);
+    assert.match(app.lastFrame(), /Total: 2h 30m \(2 entries\)/);
 
     const selectedDateSearch = worklogSearches()[1];
     assert.match(selectedDateSearch.inputs.jql, /worklogDate >= "2026-09-20"/);

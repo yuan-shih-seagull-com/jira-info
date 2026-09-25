@@ -42,19 +42,22 @@ export function getColumnWidths(terminalWidth) {
 }
 
 export function getWorklogColumnWidths(terminalWidth) {
-  const overhead = 5;
+  const hasAuthor = terminalWidth >= 24;
+  const overhead = hasAuthor ? 6 : 5;
   const available = Math.max(4, terminalWidth - overhead);
   const widths = {
+    author: hasAuthor ? Math.max(4, Math.min(18, Math.floor(available * 0.22))) : 0,
     start: Math.max(1, Math.min(8, Math.floor(available * 0.2))),
     duration: Math.max(1, Math.min(10, Math.floor(available * 0.22))),
     issue: Math.max(1, Math.min(12, Math.floor(available * 0.2)))
   };
-  for (const column of ["issue", "duration", "start"]) {
-    while (widths.start + widths.duration + widths.issue > available - 1 && widths[column] > 1) {
+  for (const column of ["issue", "duration", "start", "author"]) {
+    const minimum = column === "author" ? (hasAuthor ? 4 : 0) : 1;
+    while (widths.author + widths.start + widths.duration + widths.issue > available - 1 && widths[column] > minimum) {
       widths[column] -= 1;
     }
   }
-  const summary = Math.max(1, available - widths.start - widths.duration - widths.issue);
+  const summary = Math.max(1, available - widths.author - widths.start - widths.duration - widths.issue);
   return { ...widths, summary };
 }
 
@@ -107,6 +110,7 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
   const accountIds = colleagueAccountIds.length > 0
     ? normalizeTrackedAccountIds([session.accountId, ...colleagueAccountIds])
     : undefined;
+  const worklogAccountIds = accountIds ?? [session.accountId];
   const individualAccountIds = accountIds ?? [session.accountId];
   const displayName = session.profile?.displayName ?? session.accountId;
   const accountNames = new Map(issues
@@ -130,6 +134,25 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
   const visibleIssues = activeTab.kind === "issues" ? getIssuesForTab(issues, activeTab.accountId) : [];
   const visibleWorklogs = activeTab.kind === "worklogs" ? worklogReport?.entries ?? [] : [];
   const visibleItems = activeTab.kind === "worklogs" ? visibleWorklogs : visibleIssues;
+  const worklogAccountSummaries = worklogReport
+    ? worklogAccountIds.map((accountId) => {
+      const accountTotal = worklogReport.accountTotals.find((item) => item.accountId === accountId);
+      const accountEntries = worklogReport.entries.filter((entry) => entry.authorAccountId === accountId);
+      const author = accountEntries.find((entry) => entry.author)?.author;
+      const label = accountId === session.accountId
+        ? displayName
+        : author ?? (accountTotal?.displayName !== accountId
+          ? accountTotal?.displayName
+          : accountNames.get(accountId) ?? `Account ${accountId.slice(-8)}`);
+      return {
+        accountId,
+        label,
+        entryCount: accountTotal?.entryCount ?? 0,
+        totalTimeSpent: accountTotal?.totalTimeSpent ?? "0m"
+      };
+    })
+    : [];
+  const worklogAccountLabels = new Map(worklogAccountSummaries.map(({ accountId, label }) => [accountId, label]));
 
   const refreshIssues = async () => {
     if (refreshInProgress.current) {
@@ -168,6 +191,7 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
         callOperation: session.callOperation,
         cloudId: session.cloudId,
         accountId: session.accountId,
+        accountIds: worklogAccountIds,
         date,
         timeZone: session.timeZone
       });
@@ -288,7 +312,7 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
   const visibleRange = getVisibleIssueRange(visibleItems.length, selectedIndex, visibleCount);
   const issueCount = `${visibleIssues.length} ${visibleIssues.length === 1 ? "issue" : "issues"}`;
   const accountDescription = activeTab.kind === "worklogs"
-    ? `Worklogs for ${displayName}`
+    ? `Worklogs for ${worklogAccountIds.length} tracked ${worklogAccountIds.length === 1 ? "account" : "accounts"}`
     : activeTab.accountId !== null
       ? `Assignee: ${activeTab.label} | ${issueCount}`
       : colleagueAccountIds.length > 0
@@ -299,7 +323,7 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
     ? `Auto refresh: every ${refreshSchedule.intervalMinutes} min, ${formatWorkingDays(refreshSchedule.workingHours.days)} ${refreshSchedule.workingHours.start}-${refreshSchedule.workingHours.end} (${session.timeZone})`
     : "Auto refresh: off";
   const header = `  ${fitCell("KEY", columns.key)}${columns.assignee > 0 ? ` ${fitCell("ASSIGNEE", columns.assignee)}` : ""} ${fitCell("STATUS", columns.status)} ${fitCell("PRIORITY", columns.priority)} ${fitCell("SUMMARY", columns.summary)}`;
-  const worklogHeader = `  ${fitCell("START", worklogColumns.start)} ${fitCell("DURATION", worklogColumns.duration)} ${fitCell("ISSUE", worklogColumns.issue)} ${fitCell("SUMMARY", worklogColumns.summary)}`;
+  const worklogHeader = `  ${worklogColumns.author > 0 ? `${fitCell("AUTHOR", worklogColumns.author)} ` : ""}${fitCell("START", worklogColumns.start)} ${fitCell("DURATION", worklogColumns.duration)} ${fitCell("ISSUE", worklogColumns.issue)} ${fitCell("SUMMARY", worklogColumns.summary)}`;
   const issueRows = visibleIssues.slice(visibleRange.start, visibleRange.end).map((issue, index) => {
     const issueIndex = visibleRange.start + index;
     const selected = issueIndex === selectedIndex;
@@ -319,8 +343,11 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
     const issueKeyCell = session.jiraBaseUrl
       ? `${createTerminalHyperlink(getJiraIssueUrl(session.jiraBaseUrl, entry.issueKey), issueKey)}${" ".repeat(Math.max(0, worklogColumns.issue - issueKey.length))}`
       : fitCell(entry.issueKey, worklogColumns.issue);
+    const authorCell = worklogColumns.author > 0
+      ? `${fitCell(entry.author || worklogAccountLabels.get(entry.authorAccountId) || entry.authorAccountId, worklogColumns.author)} `
+      : "";
     const summary = String(entry.summary).replace(/\s+/g, " ").trim();
-    const row = `${selected ? "> " : "  "}${fitCell(entry.localStartTime, worklogColumns.start)} ${fitCell(entry.timeSpent, worklogColumns.duration)} ${issueKeyCell} ${fitCell(summary, worklogColumns.summary)}`;
+    const row = `${selected ? "> " : "  "}${authorCell}${fitCell(entry.localStartTime, worklogColumns.start)} ${fitCell(entry.timeSpent, worklogColumns.duration)} ${issueKeyCell} ${fitCell(summary, worklogColumns.summary)}`;
     return h(Box, { key: entry.worklogId ?? `${entry.issueKey}-${entry.startedAt}-${index}`, backgroundColor: selected ? "blue" : undefined },
       h(Text, { color: selected ? "white" : undefined }, row));
   });
@@ -337,6 +364,9 @@ export function PendingIssuesApp({ session, refreshSchedule, trackedAccountIds =
       : h(Text, { dimColor: true }, `Last refreshed: ${refreshed}${activeLoading ? " | Refreshing..." : ""}`),
     activeTab.kind === "worklogs" && worklogReport
       ? h(Text, { dimColor: true }, `Total: ${worklogReport.totalTimeSpent} (${worklogReport.entryCount} ${worklogReport.entryCount === 1 ? "entry" : "entries"})`)
+      : null,
+    activeTab.kind === "worklogs" && worklogReport
+      ? h(Text, { dimColor: true }, `By account: ${worklogAccountSummaries.map(({ label, totalTimeSpent, entryCount }) => `${label}: ${totalTimeSpent} (${entryCount})`).join(" | ")}`)
       : null,
     h(Text, { dimColor: true }, refreshDescription),
     h(Box, { flexDirection: "row", flexWrap: "wrap", marginTop: 1 },
